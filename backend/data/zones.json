@@ -1,0 +1,85 @@
+[
+  {
+    "id": "zone_2",
+    "name": "Danger Zone",
+    "points": [
+      [
+        139,
+        322
+      ],
+      [
+        517,
+        331
+      ],
+      [
+        524,
+        955
+      ],
+      [
+        517,
+        1024
+      ],
+      [
+        133,
+        1018
+      ]
+    ],
+    "zone_type": "safe",
+    "active": true,
+    "locked": false
+  },
+  {
+    "id": "zone_3",
+    "name": "Danger Zone",
+    "points": [
+      [
+        534,
+        329
+      ],
+      [
+        964,
+        329
+      ],
+      [
+        941,
+        1054
+      ],
+      [
+        523,
+        1024
+      ]
+    ],
+    "zone_type": "ppe_required",
+    "active": true,
+    "locked": false
+  },
+  {
+    "id": "zone_4",
+    "name": "Danger Zone",
+    "points": [
+      [
+        970,
+        327
+      ],
+      [
+        1522,
+        333
+      ],
+      [
+        1518,
+        917
+      ],
+      [
+        1514,
+        1042
+      ],
+      [
+        973,
+        1040
+      ]
+    ],
+    "zone_type": "restricted",
+    "active": true,
+    "locked": false
+  }
+]
