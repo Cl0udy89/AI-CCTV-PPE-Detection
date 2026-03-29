@@ -1,7 +1,87 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;1,14..32,400&family=Fira+Code:wght@400;500;600&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-body {
-  @apply bg-gray-950 text-gray-100 font-sans;
+/* ── Tailwind gray palette — dark mode (default) ────────────────────────── */
+/* Space-separated RGB channels (no rgb() wrapper) so opacity modifiers work */
+:root {
+  --twg-950: 8 15 30;
+  --twg-900: 15 24 41;
+  --twg-800: 26 37 64;
+  --twg-700: 42 58 85;
+  --twg-600: 72 100 130;
+  --twg-500: 100 126 158;
+  --twg-400: 150 170 195;
+  --twg-300: 200 214 232;
+  --twg-200: 220 228 240;
+  --twg-100: 238 242 248;
+  --twg-50:  248 250 252;
+
+  /* Semantic aliases used by inline styles in App/LoginPage/SetupPage */
+  --bg:           #080f1e;
+  --surface:      #0f1829;
+  --surface2:     #1a2540;
+  --border:       #2a3a55;
+  --text:         #e8edf5;
+  --muted:        #7a90ae;
+  --accent:       #f97316;
+  --accent-hover: #ea6c0a;
 }
+
+/* ── Light mode — remap grays to light equivalents ──────────────────────── */
+.light {
+  --twg-950: 248 250 252;   /* bg → slate-50 */
+  --twg-900: 255 255 255;   /* surface → white */
+  --twg-800: 241 245 249;   /* surface2 → slate-100 */
+  --twg-700: 226 232 240;   /* border → slate-200 */
+  --twg-600: 148 163 184;   /* slate-400 */
+  --twg-500: 100 116 139;   /* slate-500 */
+  --twg-400: 71 85 105;     /* slate-600 — secondary text */
+  --twg-300: 51 65 85;      /* slate-700 */
+  --twg-200: 30 41 59;      /* slate-800 */
+  --twg-100: 15 23 42;      /* slate-900 — main text */
+  --twg-50:  2 6 23;        /* near-black */
+
+  /* Semantic aliases */
+  --bg:           #f0f4f8;
+  --surface:      #ffffff;
+  --surface2:     #e8eef5;
+  --border:       #c8d6e8;
+  --text:         #0d1b2e;
+  --muted:        #5a7399;
+  --accent:       #ea580c;
+  --accent-hover: #c2410c;
+}
+
+/* ── text-white in light mode → near-black ──────────────────────────────── */
+/* text-white is not part of gray remapping so needs an explicit override    */
+.light .text-white { color: rgb(15 23 42) !important; }
+
+/* ── Base styles ────────────────────────────────────────────────────────── */
+body {
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-feature-settings: 'cv11', 'ss01';
+  -webkit-font-smoothing: antialiased;
+}
+
+code, pre, .font-mono {
+  font-family: 'Fira Code', monospace;
+}
+
+/* ── Inputs / selects inherit theme ────────────────────────────────────── */
+.light input,
+.light select,
+.light textarea {
+  color-scheme: light;
+}
+
+/* ── Scrollbar (hidden utility) ─────────────────────────────────────────── */
+@keyframes slide-in {
+  from { transform: translateX(110%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+.animate-slide-in { animation: slide-in 0.25s ease-out; }

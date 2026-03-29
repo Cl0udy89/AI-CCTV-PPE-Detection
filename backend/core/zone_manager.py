@@ -5,10 +5,13 @@ Zone types:
   "restricted"   — no entry. Any person inside = alert.
   "ppe_required" — PPE must be worn. Person inside WITHOUT PPE = alert.
   "safe"         — informational only, no alerts.
+
+Each zone also has enabled_violations: which PPE violations are enforced
+(subset of ["NO-Hardhat", "NO-Safety Vest", "NO-Mask"]).
 """
 import json
 import threading
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Tuple
 
@@ -16,6 +19,9 @@ import cv2
 import numpy as np
 
 ZONES_FILE = Path(__file__).parent.parent / "data" / "zones.json"
+
+
+ALL_VIOLATIONS = ["NO-Hardhat", "NO-Safety Vest", "NO-Mask"]
 
 
 @dataclass
@@ -26,6 +32,10 @@ class Zone:
     zone_type: str = "restricted"   # "restricted" | "ppe_required" | "safe"
     active: bool = True
     locked: bool = False
+    enabled_violations: List[str] = field(
+        default_factory=lambda: list(ALL_VIOLATIONS)
+    )
+    camera_id: str | None = None
 
     # colors per type (BGR)
     _COLORS = {
@@ -62,12 +72,14 @@ class Zone:
 
     def to_dict(self):
         return {
-            "id":        self.id,
-            "name":      self.name,
-            "points":    self.points,
-            "zone_type": self.zone_type,
-            "active":    self.active,
-            "locked":    self.locked,
+            "id":                 self.id,
+            "name":               self.name,
+            "points":             self.points,
+            "zone_type":          self.zone_type,
+            "active":             self.active,
+            "locked":             self.locked,
+            "enabled_violations": self.enabled_violations,
+            "camera_id":          self.camera_id,
         }
 
 
@@ -91,6 +103,8 @@ class ZoneManager:
                         zone_type=d.get("zone_type", "restricted"),
                         active=d.get("active", True),
                         locked=d.get("locked", False),
+                        enabled_violations=d.get("enabled_violations", list(ALL_VIOLATIONS)),
+                        camera_id=d.get("camera_id", None),
                     )
                     self._zones[z.id] = z
                     # keep counter above existing ids
@@ -111,13 +125,20 @@ class ZoneManager:
 
     # ----------------------------------------------------------------- CRUD
 
-    def add_zone(self, name: str, points: list, zone_type: str = "restricted") -> Zone:
+    def add_zone(self, name: str, points: list, zone_type: str = "restricted",
+                 enabled_violations: list | None = None,
+                 camera_id: str | None = None) -> Zone:
         with self._lock:
             self._counter += 1
             zid = f"zone_{self._counter}"
-            zone = Zone(id=zid, name=name,
-                        points=[list(p) for p in points],
-                        zone_type=zone_type)
+            zone = Zone(
+                id=zid, name=name,
+                points=[list(p) for p in points],
+                zone_type=zone_type,
+                enabled_violations=enabled_violations if enabled_violations is not None
+                                    else list(ALL_VIOLATIONS),
+                camera_id=camera_id,
+            )
             self._zones[zid] = zone
             self._save()
             return zone
@@ -141,20 +162,27 @@ class ZoneManager:
             self._save()
             return z
 
-    def list_zones(self) -> list[Zone]:
+    def list_zones(self, camera_id: str | None = None) -> list[Zone]:
         with self._lock:
-            return list(self._zones.values())
+            zones = list(self._zones.values())
+            if camera_id is not None:
+                zones = [z for z in zones if z.camera_id == camera_id]
+            return zones
 
     # ----------------------------------------------------------- Detection
 
-    def check_intrusions(self, person_boxes: list, person_has_violation: list[bool]) -> dict:
+    def check_intrusions(self, person_boxes: list, person_has_violation: list[bool],
+                         person_violations: list[set] | None = None) -> dict:
         """
         Returns {zone_id: [box_index, ...]} for zones that are triggered.
 
         Logic per zone_type:
           restricted   → any person inside
-          ppe_required → person inside AND that person has a PPE violation
+          ppe_required → person inside AND has a violation from zone.enabled_violations
           safe         → never triggers
+
+        person_violations: optional list of violation sets per person.
+        If provided, ppe_required zones only trigger on violations in zone.enabled_violations.
         """
         result: dict[str, list] = {}
         with self._lock:
@@ -167,8 +195,14 @@ class ZoneManager:
                         continue
                     if zone.zone_type == "restricted":
                         hits.append(i)
-                    elif zone.zone_type == "ppe_required" and person_has_violation[i]:
-                        hits.append(i)
+                    elif zone.zone_type == "ppe_required":
+                        # Use fine-grained violation types if available
+                        if person_violations is not None:
+                            ev = set(zone.enabled_violations)
+                            if person_violations[i] & ev:
+                                hits.append(i)
+                        elif person_has_violation[i]:
+                            hits.append(i)
                 if hits:
                     result[zid] = hits
         return result
@@ -187,38 +221,46 @@ class ZoneManager:
                 pts = np.array(zone.points, dtype=np.int32)
                 in_alert = zid in triggered_ids
 
-                # fill
+                # fill — 50% alpha so visible on any background
                 overlay = frame.copy()
-                fill = (0, 0, 180) if in_alert else tuple(int(c * 0.4) for c in zone.color)
+                fill = (0, 0, 200) if in_alert else tuple(int(c * 0.5) for c in zone.color)
                 cv2.fillPoly(overlay, [pts], fill)
-                cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+                cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
 
-                # border
+                # border — dark outline + colored inner for contrast on any background
                 border = (0, 0, 255) if in_alert else zone.color
-                cv2.polylines(frame, [pts], True, border, 2)
+                cv2.polylines(frame, [pts], True, (0, 0, 0), 5)   # thick black outline
+                cv2.polylines(frame, [pts], True, border, 2)       # colored inner
 
-                # label — zone name + type in center
+                # label — ASCII only (cv2 cannot render Unicode/emoji)
                 cx = int(np.mean([p[0] for p in zone.points]))
                 cy = int(np.mean([p[1] for p in zone.points]))
-                tag = {"restricted": "⛔ RESTRICTED", "ppe_required": "⚠ PPE REQUIRED", "safe": "✓ SAFE"}
-                prefix = "! " if in_alert else ""
-                type_str = tag.get(zone.zone_type, "")
+                tag = {"restricted": "RESTRICTED", "ppe_required": "PPE REQUIRED", "safe": "SAFE"}
+                prefix = "!! " if in_alert else ""
                 line1 = f"{prefix}{zone.name}"
-                line2 = type_str
+                line2 = tag.get(zone.zone_type, "")
 
                 font = cv2.FONT_HERSHEY_SIMPLEX
-                fs = 0.48
-                (w1, h1), _ = cv2.getTextSize(line1, font, fs, 1)
-                (w2, h2), _ = cv2.getTextSize(line2, font, fs - 0.04, 1)
-                bw = max(w1, w2) + 10
-                bh = h1 + h2 + 12
+                fs = 0.52
+                th = 1
+                (w1, h1), _ = cv2.getTextSize(line1, font, fs, th)
+                (w2, h2), _ = cv2.getTextSize(line2, font, fs - 0.06, th)
+                bw = max(w1, w2) + 12
+                bh = h1 + h2 + 14
                 bx = cx - bw // 2
 
-                cv2.rectangle(frame, (bx, cy - bh), (bx + bw, cy + 4),
-                              (0, 0, 0) if not in_alert else (0, 0, 160), -1)
-                text_color = (80, 80, 255) if in_alert else (255, 220, 80)
-                cv2.putText(frame, line1, (bx + 5, cy - h2 - 6), font, fs, text_color, 1)
-                cv2.putText(frame, line2, (bx + 5, cy - 2), font, fs - 0.04, (200, 200, 200), 1)
+                # semi-transparent label background
+                lbl_overlay = frame.copy()
+                bg = (0, 0, 140) if in_alert else (20, 20, 20)
+                cv2.rectangle(lbl_overlay, (bx, cy - bh), (bx + bw, cy + 4), bg, -1)
+                cv2.addWeighted(lbl_overlay, 0.8, frame, 0.2, 0, frame)
+
+                text_color = (60, 60, 255) if in_alert else (255, 220, 60)
+                # draw text with dark shadow for readability
+                cv2.putText(frame, line1, (bx + 6, cy - h2 - 6), font, fs, (0, 0, 0), 3)
+                cv2.putText(frame, line1, (bx + 6, cy - h2 - 6), font, fs, text_color, th)
+                cv2.putText(frame, line2, (bx + 6, cy - 2), font, fs - 0.06, (0, 0, 0), 3)
+                cv2.putText(frame, line2, (bx + 6, cy - 2), font, fs - 0.06, (210, 210, 210), th)
 
 
 zone_manager = ZoneManager()

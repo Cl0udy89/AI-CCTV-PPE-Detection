@@ -1,0 +1,42 @@
+services:
+
+  # ── FastAPI backend (CPU) ─────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile        # use Dockerfile.gpu for CUDA
+    image: safevision-backend:latest
+    restart: unless-stopped
+    volumes:
+      # Persistent application data (DB, zones, clips, config)
+      - ppe_data:/app/backend/data
+      # YOLO model — read-only, never baked into the image
+      - ./models:/app/models:ro
+    environment:
+      - PPE_SECRET_KEY=${PPE_SECRET_KEY:-change-this-in-production}
+    # Uncomment to expose the API directly (useful for debugging):
+    # ports:
+    #   - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s    # give torch time to load the model
+
+  # ── React frontend served by Nginx ───────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: safevision-frontend:latest
+    restart: unless-stopped
+    ports:
+      - "${PORT:-80}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+# Named volume — data survives container rebuilds
+volumes:
+  ppe_data:

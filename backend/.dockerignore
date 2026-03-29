@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.env
+
+# Data is mounted as a volume — don't bake it into the image
+data/
+
+# Local venv if any
+venv/
+.venv/
+env/

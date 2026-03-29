@@ -12,10 +12,6 @@
         331
       ],
       [
-        524,
-        955
-      ],
-      [
         517,
         1024
       ],
@@ -26,32 +22,42 @@
     ],
     "zone_type": "safe",
     "active": true,
-    "locked": false
+    "locked": false,
+    "enabled_violations": [
+      "NO-Hardhat",
+      "NO-Safety Vest",
+      "NO-Mask"
+    ]
   },
   {
     "id": "zone_3",
     "name": "Danger Zone",
     "points": [
       [
-        534,
-        329
+        537,
+        328
       ],
       [
-        964,
-        329
+        930,
+        328
       ],
       [
-        941,
-        1054
+        949,
+        1046
       ],
       [
-        523,
-        1024
+        540,
+        1010
       ]
     ],
     "zone_type": "ppe_required",
     "active": true,
-    "locked": false
+    "locked": false,
+    "enabled_violations": [
+      "NO-Hardhat",
+      "NO-Safety Vest",
+      "NO-Mask"
+    ]
   },
   {
     "id": "zone_4",
@@ -80,6 +86,39 @@
     ],
     "zone_type": "restricted",
     "active": true,
-    "locked": false
+    "locked": false,
+    "enabled_violations": [
+      "NO-Hardhat",
+      "NO-Safety Vest",
+      "NO-Mask"
+    ]
+  },
+  {
+    "id": "zone_5",
+    "name": "Danger Zone",
+    "points": [
+      [
+        1550,
+        113
+      ],
+      [
+        1869,
+        89
+      ],
+      [
+        1843,
+        806
+      ],
+      [
+        1582,
+        818
+      ]
+    ],
+    "zone_type": "ppe_required",
+    "active": true,
+    "locked": false,
+    "enabled_violations": [
+      "NO-Hardhat"
+    ]
   }
 ]

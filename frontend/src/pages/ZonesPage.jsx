@@ -12,6 +12,9 @@
  *  - Snap: when cursor within SNAP_R px of another zone's vertex → auto-align (no gap)
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { apiFetch } from '../api'
+import { useT } from '../contexts/I18nContext'
+import RuleBuilder from '../components/RuleBuilder'
 
 // ─── Polygon math ───────────────────────────────────────────────────────────
 
@@ -39,8 +42,11 @@ function polysOverlap(a, b) {
   const n = p => Array.isArray(p) ? p : [p.x, p.y]
   const an = a.map(n), bn = b.map(n)
   if (an.length < 3 || bn.length < 3) return false
-  for (const p of an) if (ptInPoly(p[0], p[1], bn)) return true
-  for (const p of bn) if (ptInPoly(p[0], p[1], an)) return true
+  // Vertices that are snapped together (within 2 px) are shared boundary points —
+  // they must NOT be treated as interior intersections.
+  const isShared = (p, verts) => verts.some(v => Math.abs(v[0]-p[0]) <= 2 && Math.abs(v[1]-p[1]) <= 2)
+  for (const p of an) if (!isShared(p, bn) && ptInPoly(p[0], p[1], bn)) return true
+  for (const p of bn) if (!isShared(p, an) && ptInPoly(p[0], p[1], an)) return true
   for (let i = 0; i < an.length; i++) {
     const a1 = an[i], a2 = an[(i+1) % an.length]
     for (let j = 0; j < bn.length; j++) {
@@ -155,16 +161,24 @@ function drawActivePoly(ctx, pts, col, mode, hoverInfo, dragIdx, drawHoverIdx) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export default function ZonesPage({ connected }) {
+  const t = useT()
+  const [section, setSection]     = useState('zones') // 'zones' | 'rules'
   const [zones, setZones]         = useState([])
+  const [cameras, setCameras]     = useState([])
+  const [selectedCameraId, setSelectedCameraId] = useState(null)  // null = all
+  const [renamingCameraId, setRenamingCameraId] = useState(null)
+  const [renameCameraLabel, setRenameCameraLabel] = useState('')
   const [mode, setMode]           = useState('live')   // 'live' | 'draw' | 'edit'
   const [snapshot, setSnapshot]   = useState(null)
   const [imgSize, setImgSize]     = useState({ w: 1280, h: 720 })
   const [ppeZoneOnly, setPpeZoneOnly] = useState(false)
 
   // Draw mode
-  const [points, setPoints]       = useState([])
-  const [zoneName, setZoneName]   = useState('Danger Zone')
-  const [zoneType, setZoneType]   = useState('restricted')
+  const [points, setPoints]           = useState([])
+  const [zoneName, setZoneName]       = useState('Danger Zone')
+  const [zoneType, setZoneType]       = useState('restricted')
+  const [showCustom, setShowCustom]   = useState(false)
+  const [drawViolations, setDrawViolations] = useState(['NO-Hardhat', 'NO-Safety Vest', 'NO-Mask'])
   const [drawDragIdx, setDrawDragIdx] = useState(null)
   const [drawHoverIdx, setDrawHoverIdx] = useState(-1)
   const didDrawDrag = useRef(false)
@@ -176,9 +190,17 @@ export default function ZonesPage({ connected }) {
   const [hoverInfo, setHoverInfo] = useState({ type: null, idx: -1 })
 
   // Inline list edit
-  const [editingId, setEditingId] = useState(null)
-  const [editName, setEditName]   = useState('')
-  const [editType, setEditType]   = useState('')
+  const [editingId, setEditingId]   = useState(null)
+  const [editName, setEditName]     = useState('')
+  const [editType, setEditType]     = useState('')
+  const [editViolations, setEditViolations] = useState([])
+
+  const ALL_VIOLATIONS = ['NO-Hardhat', 'NO-Safety Vest', 'NO-Mask']
+  const VIOLATION_LABELS = {
+    'NO-Hardhat':     'Brak kasku',
+    'NO-Safety Vest': 'Brak kamizelki',
+    'NO-Mask':        'Brak maski',
+  }
 
   // Snap hint & overlap error
   const [snapHint, setSnapHint]   = useState(null)   // { x, y } | null
@@ -188,16 +210,33 @@ export default function ZonesPage({ connected }) {
   const imgRef    = useRef(null)
 
   const loadZones = useCallback(async () => {
-    const r = await fetch('/zones/').then(x => x.json()).catch(() => [])
+    const url = selectedCameraId ? `/zones/?camera_id=${selectedCameraId}` : '/zones/'
+    const r = await apiFetch(url).then(x => x.json()).catch(() => [])
     setZones(r)
+  }, [selectedCameraId])
+
+  const loadCameras = useCallback(async () => {
+    const r = await apiFetch('/cameras').then(x => x.json()).catch(() => [])
+    setCameras(r)
   }, [])
 
   useEffect(() => {
     loadZones()
-    fetch('/detection/settings').then(r => r.json()).then(d => {
+    loadCameras()
+    apiFetch('/detection/settings').then(r => r.json()).then(d => {
       setPpeZoneOnly(d.ppe_zone_only ?? false)
     }).catch(() => {})
-  }, [loadZones])
+  }, [loadZones, loadCameras])
+
+  async function renameCamera(id, label) {
+    await apiFetch(`/cameras/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label }),
+    })
+    loadCameras()
+    setRenamingCameraId(null)
+  }
 
   // ── Snap helper ────────────────────────────────────────────────────────────
   function snapToZones(x, y, excludeId = null) {
@@ -259,7 +298,7 @@ export default function ZonesPage({ connected }) {
 
   // ── Snapshot helper ────────────────────────────────────────────────────────
   async function takeSnapshot() {
-    const r = await fetch('/stream/snapshot')
+    const r = await apiFetch('/stream/snapshot')
     if (!r.ok) { alert('Nie można pobrać klatki. Uruchom stream.'); return null }
     return URL.createObjectURL(await r.blob())
   }
@@ -268,7 +307,9 @@ export default function ZonesPage({ connected }) {
   async function startDraw() {
     if (!connected) { alert('Uruchom stream kamery'); return }
     const snap = await takeSnapshot(); if (!snap) return
-    setSnapshot(snap); setPoints([]); setOverlapErr(null); setSnapHint(null); setMode('draw')
+    setSnapshot(snap); setPoints([]); setOverlapErr(null); setSnapHint(null)
+    setShowCustom(false); setDrawViolations(['NO-Hardhat', 'NO-Safety Vest', 'NO-Mask'])
+    setMode('draw')
   }
 
   function handleCanvasClick(e) {
@@ -286,10 +327,12 @@ export default function ZonesPage({ connected }) {
     if (overlap) { setOverlapErr(overlap); return }
     setOverlapErr(null)
     try {
-      const res = await fetch('/zones/', {
+      const res = await apiFetch('/zones/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: zoneName.trim() || 'Zone', points: newPts, zone_type: zoneType }),
+        body: JSON.stringify({ name: zoneName.trim() || 'Zone', points: newPts, zone_type: zoneType,
+          enabled_violations: showCustom ? drawViolations : undefined,
+          camera_id: selectedCameraId || null }),
       })
       if (!res.ok) { alert(`Błąd ${res.status}: ${await res.text()}`); return }
       await loadZones()
@@ -394,7 +437,7 @@ export default function ZonesPage({ connected }) {
     if (overlap) { setOverlapErr(overlap); return }
     setOverlapErr(null)
     try {
-      const res = await fetch(`/zones/${editZone.id}`, {
+      const res = await apiFetch(`/zones/${editZone.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ points: newPts }),
@@ -413,7 +456,7 @@ export default function ZonesPage({ connected }) {
 
   // ── Zone list actions ──────────────────────────────────────────────────────
   async function patch(id, body) {
-    await fetch(`/zones/${id}`, {
+    await apiFetch(`/zones/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -422,11 +465,20 @@ export default function ZonesPage({ connected }) {
   }
 
   function startInlineEdit(z) {
-    setEditingId(z.id); setEditName(z.name); setEditType(z.zone_type)
+    setEditingId(z.id)
+    setEditName(z.name)
+    setEditType(z.zone_type)
+    setEditViolations(z.enabled_violations || ['NO-Hardhat', 'NO-Safety Vest', 'NO-Mask'])
+  }
+
+  function toggleEditViolation(v) {
+    setEditViolations(prev =>
+      prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]
+    )
   }
 
   async function saveInlineEdit(id) {
-    const body = { zone_type: editType }
+    const body = { zone_type: editType, enabled_violations: editViolations }
     if (editName.trim()) body.name = editName.trim()
     await patch(id, body)
     setEditingId(null)
@@ -434,7 +486,7 @@ export default function ZonesPage({ connected }) {
 
   async function togglePpeZoneOnly(val) {
     setPpeZoneOnly(val)
-    await fetch('/detection/settings', {
+    await apiFetch('/detection/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ppe_zone_only: val }),
@@ -447,11 +499,36 @@ export default function ZonesPage({ connected }) {
       ? (drawDragIdx !== null || drawHoverIdx >= 0 ? 'grab' : 'crosshair')
       : 'default'
 
+  function handleDrawZoneFromRule() { setSection('zones') }
+
   return (
-    <div className="flex gap-5 h-full min-h-0">
+    <div className="flex flex-col gap-3 h-full min-h-0 overflow-hidden">
+      {/* Section tabs */}
+      <div className="flex-shrink-0 flex gap-1 border-b pb-0" style={{ borderColor: 'var(--border)' }}>
+        {[{ id: 'zones', label: 'Strefy' }, { id: 'rules', label: 'Kreator Reguł' }].map(tab => (
+          <button key={tab.id} onClick={() => setSection(tab.id)}
+            className="relative px-4 py-2 text-sm font-medium transition-colors cursor-pointer"
+            style={{ color: section === tab.id ? 'var(--text)' : 'var(--muted)' }}
+            onMouseEnter={e => { if (section !== tab.id) e.currentTarget.style.color = 'var(--text)' }}
+            onMouseLeave={e => { if (section !== tab.id) e.currentTarget.style.color = 'var(--muted)' }}>
+            {tab.label}
+            {section === tab.id && (
+              <span className="absolute bottom-0 left-2 right-2 h-0.5 rounded-t" style={{ backgroundColor: 'var(--accent)' }} />
+            )}
+          </button>
+        ))}
+      </div>
+
+      {section === 'rules' && (
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <RuleBuilder zones={zones} onDrawZone={handleDrawZoneFromRule} />
+        </div>
+      )}
+
+    {section === 'zones' && <div className="flex flex-col xl:flex-row gap-5 flex-1 min-h-0 overflow-y-auto xl:overflow-hidden">
 
       {/* ── LEFT: camera / canvas ────────────────────────────────────────── */}
-      <div className="flex-1 flex flex-col gap-3 min-w-0">
+      <div className="flex-1 flex flex-col gap-3 min-w-0 min-h-96 xl:min-h-0">
         <div className="flex items-center gap-3 flex-wrap min-h-8">
           <h2 className="text-lg font-semibold text-white">
             {mode === 'draw' ? 'Rysowanie strefy'
@@ -480,7 +557,7 @@ export default function ZonesPage({ connected }) {
         </div>
 
         {/* Video / Canvas — outer div holds flex space, inner fills it absolutely */}
-        <div className="flex-1 min-h-0 relative" style={{ minHeight: '320px' }}>
+        <div className="flex-1 min-h-0 relative">
           <div className="absolute inset-0 bg-black rounded-xl overflow-hidden">
             {mode === 'live' ? (
               connected ? (
@@ -554,8 +631,10 @@ export default function ZonesPage({ connected }) {
           <div className="flex-shrink-0 bg-gray-900 rounded-xl px-4 py-3 flex flex-wrap items-center gap-3">
             <input value={zoneName} onChange={e => setZoneName(e.target.value)}
               placeholder="Nazwa strefy"
-              className="w-36 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm
+              className="w-32 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm
                          focus:outline-none focus:ring-2 focus:ring-orange-500" />
+
+            {/* Zone type buttons */}
             {ZONE_TYPES.map(t => (
               <button key={t.value} onClick={() => setZoneType(t.value)}
                 className={`px-3 py-1.5 rounded-lg border text-sm font-medium transition-all ${t.color}
@@ -563,6 +642,35 @@ export default function ZonesPage({ connected }) {
                 {t.label}
               </button>
             ))}
+
+            {/* Custom toggle */}
+            <button onClick={() => setShowCustom(v => !v)}
+              className={`px-3 py-1.5 rounded-lg border text-sm font-medium transition-all
+                          ${showCustom
+                            ? 'bg-blue-900/40 border-blue-500 text-blue-200 ring-2 ring-white/30'
+                            : 'bg-gray-800/60 border-gray-600 text-gray-400 hover:text-white hover:border-gray-400'}`}>
+              ⚙ Custom
+            </button>
+
+            {/* Custom panel — appears inline to the right of Custom button */}
+            {showCustom && (
+              <div className="flex items-center gap-3 border-l border-gray-600 pl-3">
+                <span className="text-xs text-gray-400 whitespace-nowrap">Wykrywaj:</span>
+                {ALL_VIOLATIONS.map(v => (
+                  <label key={v} className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer hover:text-white whitespace-nowrap">
+                    <input type="checkbox"
+                      checked={drawViolations.includes(v)}
+                      onChange={() => setDrawViolations(prev =>
+                        prev.includes(v) ? prev.filter(x => x !== v) : [...prev, v]
+                      )}
+                      className="w-3.5 h-3.5 accent-blue-500"
+                    />
+                    {VIOLATION_LABELS[v]}
+                  </label>
+                ))}
+              </div>
+            )}
+
             <div className="flex gap-2 ml-auto">
               <button onClick={saveZone} disabled={points.length < 3}
                 className="px-4 py-1.5 rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-40 text-sm font-medium transition-colors">
@@ -595,7 +703,57 @@ export default function ZonesPage({ connected }) {
       </div>
 
       {/* ── RIGHT: zone list ──────────────────────────────────────────────── */}
-      <aside className="w-80 flex-shrink-0 flex flex-col gap-4 overflow-y-auto">
+      <aside className="flex-shrink-0 w-full xl:w-80 flex flex-col gap-4 xl:overflow-y-auto">
+
+        {/* Camera selector */}
+        <div className="bg-gray-900 rounded-xl p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-white">{t('zones.cameraSelector')}</h3>
+          </div>
+          <div className="flex gap-2">
+            <select
+              value={selectedCameraId || ''}
+              onChange={e => setSelectedCameraId(e.target.value || null)}
+              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white
+                         focus:outline-none focus:border-orange-500 transition-colors">
+              <option value="">{t('zones.allCameras')}</option>
+              {cameras.map(c => (
+                <option key={c.id} value={c.id}>{c.label}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Camera rename */}
+          {selectedCameraId && cameras.find(c => c.id === selectedCameraId) && (
+            <div className="pt-1">
+              {renamingCameraId === selectedCameraId ? (
+                <div className="flex gap-2">
+                  <input
+                    value={renameCameraLabel}
+                    onChange={e => setRenameCameraLabel(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && renameCamera(selectedCameraId, renameCameraLabel)}
+                    className="flex-1 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-xs text-white
+                               focus:outline-none focus:ring-1 focus:ring-orange-500"
+                    autoFocus
+                  />
+                  <button onClick={() => renameCamera(selectedCameraId, renameCameraLabel)}
+                    className="px-2 py-1 rounded bg-green-700 hover:bg-green-600 text-xs transition-colors">✓</button>
+                  <button onClick={() => setRenamingCameraId(null)}
+                    className="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-xs transition-colors">✕</button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => {
+                    setRenamingCameraId(selectedCameraId)
+                    setRenameCameraLabel(cameras.find(c => c.id === selectedCameraId)?.label || '')
+                  }}
+                  className="text-xs text-gray-400 hover:text-white transition-colors">
+                  ✏ {t('zones.renameCamera')}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* PPE zone-only toggle */}
         <div className="bg-gray-900 rounded-xl p-4 space-y-3">
@@ -669,7 +827,7 @@ export default function ZonesPage({ connected }) {
                       </button>
 
                       {/* Delete */}
-                      <button onClick={() => fetch(`/zones/${z.id}`, { method: 'DELETE' }).then(loadZones)}
+                      <button onClick={() => apiFetch(`/zones/${z.id}`, { method: 'DELETE' }).then(loadZones)}
                         disabled={z.locked}
                         className="text-xs text-red-400 hover:text-red-300 disabled:opacity-20 disabled:cursor-not-allowed px-1 transition-colors">
                         ✕
@@ -678,17 +836,44 @@ export default function ZonesPage({ connected }) {
 
                     {/* Type selector or badge */}
                     {isEditing ? (
-                      <div className="flex flex-wrap gap-1">
-                        {ZONE_TYPES.map(t => (
-                          <button key={t.value} onClick={() => setEditType(t.value)}
-                            className={`px-2 py-0.5 rounded text-xs font-medium transition-all ${t.badge}
-                                        ${editType === t.value ? 'ring-1 ring-white/60' : 'opacity-50 hover:opacity-80'}`}>
-                            {t.label}
-                          </button>
-                        ))}
-                      </div>
+                      <>
+                        <div className="flex flex-wrap gap-1">
+                          {ZONE_TYPES.map(t => (
+                            <button key={t.value} onClick={() => setEditType(t.value)}
+                              className={`px-2 py-0.5 rounded text-xs font-medium transition-all ${t.badge}
+                                          ${editType === t.value ? 'ring-1 ring-white/60' : 'opacity-50 hover:opacity-80'}`}>
+                              {t.label}
+                            </button>
+                          ))}
+                        </div>
+                        {/* Per-zone violation checkboxes */}
+                        <div className="mt-1 space-y-0.5">
+                          <div className="text-xs text-gray-500 mb-1">Wykrywaj naruszenia:</div>
+                          {ALL_VIOLATIONS.map(v => (
+                            <label key={v} className="flex items-center gap-2 cursor-pointer text-xs text-gray-300 hover:text-white">
+                              <input type="checkbox"
+                                checked={editViolations.includes(v)}
+                                onChange={() => toggleEditViolation(v)}
+                                className="w-3.5 h-3.5 rounded accent-orange-500"
+                              />
+                              {VIOLATION_LABELS[v]}
+                            </label>
+                          ))}
+                        </div>
+                      </>
                     ) : (
-                      <div className={`text-xs rounded px-2 py-1 ${ti.badge}`}>{ti.label}</div>
+                      <div className="space-y-1">
+                        <div className={`text-xs rounded px-2 py-1 ${ti.badge}`}>{ti.label}</div>
+                        {(z.enabled_violations || []).length < 3 && (
+                          <div className="flex flex-wrap gap-1">
+                            {(z.enabled_violations || []).map(v => (
+                              <span key={v} className="text-xs bg-gray-700 text-gray-300 rounded px-1.5 py-0.5">
+                                {VIOLATION_LABELS[v] || v}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     )}
 
                     {/* Action buttons */}
@@ -730,6 +915,7 @@ export default function ZonesPage({ connected }) {
           )}
         </div>
       </aside>
+    </div>}
     </div>
   )
 }

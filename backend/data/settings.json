@@ -1,0 +1,16 @@
+{
+  "confidence": 0.35,
+  "violation_confidence": 0.2,
+  "min_box_area": 500,
+  "ppe_zone_only": true,
+  "violation_threshold": 5.0,
+  "cooldown_seconds": 120,
+  "enabled_classes": [
+    "vehicle",
+    "Person",
+    "Safety Vest",
+    "Hardhat",
+    "NO-Hardhat",
+    "machinery"
+  ]
+}

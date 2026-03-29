@@ -6,6 +6,7 @@
  * - Live intrusion counter polling
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { apiFetch } from '../api'
 
 const ZONE_COLORS = ['#f97316','#ef4444','#a855f7','#06b6d4','#22c55e','#eab308']
 
@@ -20,7 +21,7 @@ export default function ZoneEditor({ connected }) {
   const imgRef    = useRef(null)
 
   const loadZones = useCallback(async () => {
-    const r = await fetch('/zones/').then(x => x.json()).catch(() => [])
+    const r = await apiFetch('/zones/').then(x => x.json()).catch(() => [])
     setZones(r)
   }, [])
 
@@ -69,7 +70,7 @@ export default function ZoneEditor({ connected }) {
   }, [points, drawing, snapshot])
 
   async function startDrawing() {
-    const r = await fetch('/stream/snapshot')
+    const r = await apiFetch('/stream/snapshot')
     if (!r.ok) { alert('Najpierw uruchom stream kamery.'); return }
     const blob = await r.blob()
     const url  = URL.createObjectURL(blob)
@@ -100,7 +101,7 @@ export default function ZoneEditor({ connected }) {
 
   async function saveZone() {
     if (points.length < 3) { alert('Potrzeba co najmniej 3 punktów.'); return }
-    await fetch('/zones/', {
+    await apiFetch('/zones/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -113,7 +114,7 @@ export default function ZoneEditor({ connected }) {
   }
 
   async function toggleZone(id, currentActive) {
-    await fetch(`/zones/${id}`, {
+    await apiFetch(`/zones/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ active: !currentActive }),
@@ -122,7 +123,7 @@ export default function ZoneEditor({ connected }) {
   }
 
   async function deleteZone(id) {
-    await fetch(`/zones/${id}`, { method: 'DELETE' })
+    await apiFetch(`/zones/${id}`, { method: 'DELETE' })
     loadZones()
   }
 

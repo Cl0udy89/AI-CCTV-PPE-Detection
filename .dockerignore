@@ -1,0 +1,7 @@
+# Root-level ignore — keeps the build context small when building from project root
+.git
+.gitignore
+*.md
+start.bat
+prod-apps/
+ai-cctv-ppe-backup/

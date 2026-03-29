@@ -1,6 +1,10 @@
 @echo off
 echo ============================================
-echo  AI CCTV PPE Detection -- Chapter 1 Start
+echo  SafeVision PPE Detection -- Start
+echo ============================================
+echo.
+echo  NOTE: For first production deploy, run:
+echo    python backend/reset_db.py
 echo ============================================
 
 :: --- Backend ---

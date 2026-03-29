@@ -1,8 +1,9 @@
 /**
  * Status bar shown below the video feed.
- * Polls /detection/classes to show active class count + color legend.
+ * Polls /stream/stats for FPS, person count, violation count, mute state.
  */
 import { useEffect, useState } from 'react'
+import { apiFetch } from '../api'
 
 const LEGEND = [
   { color: '#00dc00', label: 'PPE OK' },
@@ -12,16 +13,18 @@ const LEGEND = [
 ]
 
 export default function StatusBar({ connected }) {
-  const [classCount, setClassCount] = useState({ enabled: 0, all: 0 })
+  const [stats, setStats] = useState({
+    fps: 0, person_count: 0, violation_count: 0, muted: false, mute_remaining: 0,
+  })
 
   useEffect(() => {
     if (!connected) return
     const id = setInterval(() => {
-      fetch('/detection/classes')
+      apiFetch('/stream/stats')
         .then(r => r.json())
-        .then(d => setClassCount({ enabled: d.enabled.length, all: d.all.length }))
+        .then(d => setStats(d))
         .catch(() => {})
-    }, 2000)
+    }, 1000)
     return () => clearInterval(id)
   }, [connected])
 
@@ -35,11 +38,33 @@ export default function StatusBar({ connected }) {
         <span className="text-gray-300 text-sm">BotSORT tracking active</span>
       </div>
 
-      {/* Class count */}
-      <div className="text-gray-400">
-        Klasy: <span className="text-white font-semibold">{classCount.enabled}</span>
-        <span className="text-gray-600"> / {classCount.all}</span>
+      {/* FPS */}
+      <div className="flex items-center gap-1.5 text-gray-400">
+        <span className="font-mono text-white font-semibold">{stats.fps}</span>
+        <span>FPS</span>
       </div>
+
+      {/* Persons */}
+      <div className="flex items-center gap-1.5 text-gray-400">
+        <span>👤</span>
+        <span className="font-mono text-white font-semibold">{stats.person_count}</span>
+        <span>osób</span>
+      </div>
+
+      {/* Violations */}
+      <div className={`flex items-center gap-1.5 ${stats.violation_count > 0 ? 'text-red-400' : 'text-gray-400'}`}>
+        <span>⚠</span>
+        <span className="font-mono font-semibold">{stats.violation_count}</span>
+        <span>naruszeń</span>
+      </div>
+
+      {/* Mute indicator */}
+      {stats.muted && (
+        <div className="flex items-center gap-1.5 text-cyan-400 bg-cyan-900/30 rounded px-2 py-0.5">
+          <span>🔇</span>
+          <span>Wyciszono ({stats.mute_remaining}s)</span>
+        </div>
+      )}
 
       {/* Color legend */}
       <div className="flex items-center gap-3 ml-2">
@@ -53,7 +78,7 @@ export default function StatusBar({ connected }) {
 
       {/* Threshold */}
       <div className="ml-auto text-gray-500">
-        Alert po: <span className="text-yellow-400">3 s</span>
+        Alert po: <span className="text-yellow-400">{stats.violation_threshold ?? 3}s</span>
       </div>
     </div>
   )

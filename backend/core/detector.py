@@ -6,8 +6,9 @@ Strategy:
   - .track() gives each detection a persistent track_id across frames
   - For Person boxes: find overlapping NO-* violation boxes via IOU
   - Track violation duration per person track_id
-  - After VIOLATION_THRESHOLD seconds: red corners + warning badge + icons
+  - After violation_threshold seconds: red corners + warning badge + icons
 """
+import json
 import time
 import cv2
 import numpy as np
@@ -15,11 +16,11 @@ from collections import defaultdict, deque
 from pathlib import Path
 from ultralytics import YOLO
 
-MODEL_PATH = Path(__file__).parent.parent.parent / "models" / "best.pt"
-ICONS_DIR  = Path(__file__).parent.parent / "assets" / "icons"
+MODEL_PATH    = Path(__file__).parent.parent.parent / "models" / "best.pt"
+ICONS_DIR     = Path(__file__).parent.parent / "assets" / "icons"
+SETTINGS_PATH = Path(__file__).parent.parent / "data" / "settings.json"
 
-VIOLATION_THRESHOLD = 3.0   # seconds before alert triggers
-TRACK_HISTORY_LEN   = 40    # frames to keep for trail
+TRACK_HISTORY_LEN = 40    # frames to keep for trail
 
 ALL_CLASSES = [
     "Hardhat",
@@ -113,17 +114,26 @@ class Detector:
     def __init__(self):
         self.model = YOLO(str(MODEL_PATH))
         self.enabled_classes: set[str] = set(ALL_CLASSES)
-        self.confidence: float = 0.45           # global threshold (Person, PPE, etc.)
-        self.violation_confidence: float = 0.28 # lower threshold for NO-* classes only
-        self.min_box_area: int = 1000           # px² — filters out tiny false positives
-        self.ppe_zone_only: bool = False        # if True: PPE alerts only inside ppe_required zones
+        self.confidence: float = 0.45
+        self.violation_confidence: float = 0.28
+        self.min_box_area: int = 1000
+        self.ppe_zone_only: bool = False
+        self.violation_threshold: float = 3.0   # seconds before alert triggers
+        self.cooldown_seconds: int = 60          # min seconds between incidents per track
+        self.muted_until: float = 0.0
 
-        # Per-track state: start_time, duration, track_history
+        # Per-track state
         self._tracks: dict = defaultdict(lambda: {
             "violation_start": None,
             "duration": 0.0,
             "history": deque(maxlen=TRACK_HISTORY_LEN),
+            "was_alerting": False,
         })
+        self._last_incident_time: dict[int, float] = {}
+
+        # Live stats
+        self._stats: dict = {"person_count": 0, "violation_count": 0, "fps": 0.0}
+        self._frame_times: deque = deque(maxlen=60)
 
         # Pre-load icons
         self._icons: dict[str, np.ndarray | None] = {}
@@ -132,33 +142,120 @@ class Detector:
             img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED) if path.exists() else None
             self._icons[cls] = img
 
+        # Load persisted settings (overrides defaults above)
+        self._load_settings()
+
+    # ── Setters (each persists settings) ─────────────────────────────────────
+
     def set_enabled_classes(self, classes: list[str]):
         self.enabled_classes = set(classes)
+        self._save_settings()
 
     def set_confidence(self, conf: float):
         self.confidence = max(0.1, min(0.95, conf))
+        self._save_settings()
 
     def set_violation_confidence(self, conf: float):
         self.violation_confidence = max(0.05, min(self.confidence, conf))
+        self._save_settings()
 
     def set_min_box_area(self, area: int):
         self.min_box_area = max(0, area)
+        self._save_settings()
 
-    def detect(self, frame: np.ndarray) -> tuple[np.ndarray, set[str]]:
+    def set_violation_threshold(self, t: float):
+        self.violation_threshold = max(0.5, min(30.0, t))
+        self._save_settings()
+
+    def set_cooldown_seconds(self, s: int):
+        self.cooldown_seconds = max(0, min(3600, s))
+        self._save_settings()
+
+    def set_ppe_zone_only(self, v: bool):
+        self.ppe_zone_only = v
+        self._save_settings()
+
+    # ── Mute support ─────────────────────────────────────────────────────────
+
+    def mute(self, seconds: int = 300):
+        self.muted_until = time.time() + seconds
+
+    def unmute(self):
+        self.muted_until = 0.0
+
+    def is_muted(self) -> bool:
+        return time.time() < self.muted_until
+
+    def mute_remaining(self) -> int:
+        """Returns seconds remaining in mute, 0 if not muted."""
+        return max(0, int(self.muted_until - time.time()))
+
+    # ── Live stats ────────────────────────────────────────────────────────────
+
+    def get_stats(self) -> dict:
+        return dict(self._stats)
+
+    # ── Settings persistence ──────────────────────────────────────────────────
+
+    def _load_settings(self):
+        try:
+            if SETTINGS_PATH.exists():
+                data = json.loads(SETTINGS_PATH.read_text())
+                self.confidence           = data.get("confidence",           self.confidence)
+                self.violation_confidence = data.get("violation_confidence", self.violation_confidence)
+                self.min_box_area         = data.get("min_box_area",         self.min_box_area)
+                self.ppe_zone_only        = data.get("ppe_zone_only",        self.ppe_zone_only)
+                self.violation_threshold  = data.get("violation_threshold",  self.violation_threshold)
+                self.cooldown_seconds     = data.get("cooldown_seconds",     self.cooldown_seconds)
+                classes = data.get("enabled_classes")
+                if classes:
+                    self.enabled_classes = set(classes)
+        except Exception:
+            pass
+
+    def _save_settings(self):
+        try:
+            SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "confidence":           self.confidence,
+                "violation_confidence": self.violation_confidence,
+                "min_box_area":         self.min_box_area,
+                "ppe_zone_only":        self.ppe_zone_only,
+                "violation_threshold":  self.violation_threshold,
+                "cooldown_seconds":     self.cooldown_seconds,
+                "enabled_classes":      list(self.enabled_classes),
+            }
+            SETTINGS_PATH.write_text(json.dumps(data, indent=2))
+        except Exception:
+            pass
+
+    # ── Main detection loop ───────────────────────────────────────────────────
+
+    def detect(self, frame: np.ndarray) -> tuple[np.ndarray, set[str], list[dict]]:
         """
         Run tracking + PPE violation detection.
-        Returns (annotated_frame, intrusion_zone_ids).
+        Returns (annotated_frame, intrusion_zone_ids, new_incidents).
+        new_incidents: list of {track_id, violations, snapshot_frame}
         """
         from core.zone_manager import zone_manager
 
         now = time.time()
+
+        # FPS tracking
+        self._frame_times.append(now)
+        if len(self._frame_times) >= 2:
+            span = self._frame_times[-1] - self._frame_times[0]
+            self._stats["fps"] = round((len(self._frame_times) - 1) / span, 1) if span > 0 else 0.0
+
         annotated = frame.copy()
+        new_incidents: list[dict] = []
 
         if not self.enabled_classes:
-            return annotated, set()
+            self._stats["person_count"] = 0
+            self._stats["violation_count"] = 0
+            return annotated, set(), new_incidents
 
-        # Run BotSORT tracking — use the lower of the two thresholds so YOLO
-        # returns violation-class boxes that would otherwise be filtered out.
+        # Run BotSORT tracking
         inference_conf = min(self.confidence, self.violation_confidence)
         results = self.model.track(
             frame, persist=True, verbose=False,
@@ -167,7 +264,9 @@ class Detector:
         )[0]
 
         if results.boxes is None or len(results.boxes) == 0:
-            return annotated, set()
+            self._stats["person_count"] = 0
+            self._stats["violation_count"] = 0
+            return annotated, set(), new_incidents
 
         boxes   = results.boxes.xyxy.cpu().numpy()
         cls_ids = results.boxes.cls.cpu().numpy().astype(int)
@@ -176,9 +275,8 @@ class Detector:
                    if results.boxes.id is not None
                    else np.arange(len(boxes)))
 
-        # Per-class confidence + size filter:
-        #   violation classes  → violation_confidence (more sensitive)
-        #   everything else    → global confidence
+        names = self.model.names
+
         def _box_area(b):
             return max(0, b[2] - b[0]) * max(0, b[3] - b[1])
 
@@ -194,30 +292,29 @@ class Detector:
         confs   = confs[keep]
         ids     = ids[keep]
 
-        names = self.model.names
-
-        # Separate persons from PPE/other detections
         person_idxs    = [i for i, c in enumerate(cls_ids) if names[c] == "Person"]
         violation_idxs = [i for i, c in enumerate(cls_ids) if names[c] in VIOLATION_CLASSES]
         ppe_idxs       = [i for i, c in enumerate(cls_ids) if names[c] in PPE_CLASSES]
 
-        # --- Draw non-person, non-violation classes ---
+        # Draw non-person, non-violation classes
         for i, (box, cid, conf) in enumerate(zip(boxes, cls_ids, confs)):
             label = names[cid]
             if label not in self.enabled_classes:
                 continue
             if label in ("Person",) or label in VIOLATION_CLASSES:
-                continue  # handled separately below
+                continue
             x1, y1, x2, y2 = map(int, box)
             color = CLASS_COLORS.get(label, (200, 200, 200))
             cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 1)
             self._draw_label(annotated, label, conf, x1, y1, color)
 
-        # Collect per-person data for zone checks
-        person_boxes_list: list[tuple] = []
-        person_has_violation: list[bool] = []
+        person_boxes_list:    list[tuple]    = []
+        person_has_violation: list[bool]     = []
+        person_violations:    list[set[str]] = []
+        potential_incidents:  list[dict]     = []
 
-        # --- Process each Person ---
+        active_violation_count = 0
+
         for pi in person_idxs:
             if "Person" not in self.enabled_classes:
                 break
@@ -229,7 +326,6 @@ class Detector:
 
             self._tracks[track_id]["history"].append((pcx, py2))
 
-            # Find overlapping violation detections
             raw_violations: set[str] = set()
             for vi in violation_idxs:
                 vlabel = names[cls_ids[vi]]
@@ -238,14 +334,10 @@ class Detector:
                 if _iou(pbox, tuple(map(int, boxes[vi]))) > 0.05:
                     raw_violations.add(vlabel)
 
-            # ---- Inverse PPE inference (close-range) ----
-            # If person is large enough, check PPE presence directly.
-            # No Hardhat/Vest confirmed → synthesize violation (more reliable than NO-* detection).
+            # Inverse PPE inference
             person_area = (px2 - px1) * (py2 - py1)
             if person_area >= PPE_INFER_AREA:
                 def _ppe_present(ppe_cls):
-                    # Require HIGH confidence to confirm PPE present — avoids false
-                    # positives (dark hair / cap confused with Hardhat at ~0.45 conf).
                     confirm_thresh = max(self.confidence, 0.65)
                     for ai in ppe_idxs:
                         if names[cls_ids[ai]] != ppe_cls or confs[ai] < confirm_thresh:
@@ -263,9 +355,6 @@ class Detector:
                     if not _ppe_present("Safety Vest"):
                         raw_violations.add("NO-Safety Vest")
 
-            # Uncertain: no violation detected but model should be able to detect PPE status.
-            # Do NOT check for PPE presence — model false-positives (shirt → Safety Vest)
-            # would cause incorrect green. Yellow is always safer than green.
             relevant_enabled = (
                 "NO-Hardhat"     in self.enabled_classes or
                 "NO-Safety Vest" in self.enabled_classes
@@ -274,8 +363,8 @@ class Detector:
 
             person_boxes_list.append(pbox)
             person_has_violation.append(bool(raw_violations))
+            person_violations.append(set(raw_violations))
 
-            # In ppe_zone_only mode suppress PPE alerts outside zones (handled below)
             t = self._tracks[track_id]
             if raw_violations:
                 if t["violation_start"] is None:
@@ -285,19 +374,35 @@ class Detector:
                 t["violation_start"] = None
                 t["duration"] = 0.0
 
-            is_alerting = t["duration"] >= VIOLATION_THRESHOLD and (
-                not self.ppe_zone_only  # will refine per-zone below
+            is_alerting = t["duration"] >= self.violation_threshold and (
+                not self.ppe_zone_only
             )
             active_violations = raw_violations if (not self.ppe_zone_only or is_alerting) else set()
 
             if is_alerting:
-                person_color = (0, 0, 255)          # red   — VIOLATION
+                active_violation_count += 1
+
+            # Cooldown check: don't re-trigger if within cooldown window
+            last_inc = self._last_incident_time.get(track_id, 0)
+            in_cooldown = (now - last_inc) < self.cooldown_seconds
+
+            newly_triggered = is_alerting and not t.get("was_alerting", False) and not in_cooldown
+            t["was_alerting"] = is_alerting
+            if newly_triggered and active_violations:
+                potential_incidents.append({
+                    "track_id":   track_id,
+                    "violations": set(active_violations),
+                    "person_idx": len(person_boxes_list) - 1,
+                })
+
+            if is_alerting:
+                person_color = (0, 0, 255)
             elif active_violations:
-                person_color = (0, 140, 255)         # orange — timer running
+                person_color = (0, 140, 255)
             elif uncertain:
-                person_color = UNCERTAIN_COLOR       # yellow — PPE status unknown
+                person_color = UNCERTAIN_COLOR
             else:
-                person_color = (0, 220, 0)           # green  — PPE confirmed OK
+                person_color = (0, 220, 0)
 
             if is_alerting:
                 _draw_corners(annotated, px1, py1, px2, py2, person_color, thickness=3)
@@ -318,6 +423,12 @@ class Detector:
                 cv2.putText(annotated, btext, (bx, py2 + 14),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
+            # Mute banner overlay
+            if self.is_muted():
+                rem = self.mute_remaining()
+                cv2.putText(annotated, f"MUTED {rem}s", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+
             history = list(self._tracks[track_id]["history"])
             if len(history) > 1:
                 for j in range(1, len(history)):
@@ -332,37 +443,56 @@ class Detector:
                         _overlay_icon(annotated, self._icons[vcls], icon_x, icon_y)
                         icon_x += 40
 
-        # ---- Zone intrusion check ----
+        # Update live stats
+        self._stats["person_count"]    = len(person_idxs)
+        self._stats["violation_count"] = active_violation_count
+
+        # Zone intrusion check
         intrusion_map = (
-            zone_manager.check_intrusions(person_boxes_list, person_has_violation)
+            zone_manager.check_intrusions(
+                person_boxes_list, person_has_violation, person_violations)
             if person_boxes_list else {}
         )
         intrusion_zone_ids = set(intrusion_map.keys())
 
-        # Draw zone badge for each person inside a triggered zone
+        # Fill zone info into potential incidents, then emit
+        for inc in potential_incidents:
+            pidx = inc.pop("person_idx")
+            zone_id, zone_name = None, None
+            for zid, box_indices in intrusion_map.items():
+                if pidx in box_indices:
+                    z = next((z for z in zone_manager.list_zones() if z.id == zid), None)
+                    if z:
+                        zone_id   = zid
+                        zone_name = z.name
+                    break
+            inc["zone_id"]   = zone_id
+            inc["zone_name"] = zone_name
+            # Only emit if not muted; record last incident time
+            if not self.is_muted():
+                self._last_incident_time[inc["track_id"]] = now
+                new_incidents.append(inc)
+
+        # Draw zone badges
         for zid, box_indices in intrusion_map.items():
             zone = next((z for z in zone_manager.list_zones() if z.id == zid), None)
             if zone is None:
                 continue
 
-            # Color + label per zone type
             if zone.zone_type == "restricted":
-                badge_color = (0, 0, 220)          # red
+                badge_color = (0, 0, 220)
                 badge_text  = f"⛔ {zone.name}"
             elif zone.zone_type == "ppe_required":
-                badge_color = (0, 140, 255)         # orange
+                badge_color = (0, 140, 255)
                 badge_text  = f"⚠ {zone.name}  — PPE REQUIRED"
             else:
-                badge_color = (60, 160, 60)         # green
+                badge_color = (60, 160, 60)
                 badge_text  = f"✓ {zone.name}"
 
             for bi in box_indices:
                 px1, py1, px2, py2 = person_boxes_list[bi]
-
-                # Bold outline on person box
                 cv2.rectangle(annotated, (px1, py1), (px2, py2), badge_color, 3)
 
-                # Zone badge — solid background pill above the box
                 font       = cv2.FONT_HERSHEY_SIMPLEX
                 font_scale = 0.52
                 thickness  = 1
@@ -377,13 +507,12 @@ class Detector:
                 cv2.putText(annotated, badge_text, (bx1 + pad, by2 - pad - 1),
                             font, font_scale, (255, 255, 255), thickness)
 
-                # PPE violation icons (ppe_zone_only mode)
                 if self.ppe_zone_only and person_has_violation[bi]:
                     for vcls in ["NO-Hardhat", "NO-Safety Vest", "NO-Mask"]:
                         if vcls in self.enabled_classes and self._icons.get(vcls) is not None:
                             _overlay_icon(annotated, self._icons[vcls], px2 + 6, py1 - 36)
 
-        return annotated, intrusion_zone_ids
+        return annotated, intrusion_zone_ids, new_incidents
 
     @staticmethod
     def _draw_label(frame, label, conf, x1, y1, color):
