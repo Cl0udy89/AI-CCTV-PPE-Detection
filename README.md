@@ -31,8 +31,3 @@ Open http://localhost:3000
 
 ---
 
-## Chapter 1 Features
-- OBS Virtual Camera (webcam device 0/1/2)
-- RTSP stream support
-- Real-time YOLO PPE detection
-- Toggle detection classes live with checkboxes
